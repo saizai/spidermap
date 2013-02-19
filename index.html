@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+	<head>
+		<link rel="stylesheet" href="http://cdn.leafletjs.com/leaflet-0.5.1/leaflet.css" />
+		<!--[if lte IE 8]>
+		    <link rel="stylesheet" href="http://cdn.leafletjs.com/leaflet-0.5.1/leaflet.ie.css" />
+		<![endif]-->
+
+		<script src="http://cdn.leafletjs.com/leaflet-0.5.1/leaflet.js"></script>
+		<script src="http://code.jquery.com/jquery-1.9.1.min.js"></script>
+		<script src="http://code.jquery.com/jquery-migrate-1.1.1.min.js"></script>
+	</head>
+	<body>
+		<script>
+			var base = "http://webservices.nextbus.com/service/publicXMLFeed?command=";
+			var agencies = {};
+			var routes = {};
+			var stops = {};
+			var schedules = {};
+			var midnight = new Date();
+			midnight.setHours(0,0,0,0);
+			
+			function time(msec_since_epoch) {
+				return new Date(midnight.getTime() + msec_since_epoch);
+			}
+		
+			function setFromXML(data, obj, attrs) {
+				$.each(attrs, function(k,v) {
+					if(data.attributes[v]) {obj[v] = data.attributes[v].value;}
+				})
+			}
+		
+			// curries the agency into the handling function
+			function handleRoutesListData(agency) {
+				return function(routesListData){
+					$.each($(routesListData).find('route'), function(routes_i, routeListData){ 
+						// tag, title
+						route = routeListData.attributes['tag'].value;
+						if(!routes[[agency, route]]) {routes[[agency, route]] = {};}
+					
+						// recurse - async get route config
+						$.get(base + "routeConfig&terse&a=" + agency + "&r=" + route,
+						 handleRouteConfigData(agency, route));
+					});
+				};
+			}
+		
+			function handleRouteConfigData(agency, route) {
+				return function(routesConfigData){
+					$.each($(routesConfigData).find('route'), function(routes_config_i, routeData) {
+						// tag, 
+						setFromXML(routeData, routes[[agency, route]], ['title', 'color', 'oppositeColor',
+						 'latMin', 'latMax', 'lonMin', 'lonMax']);
+						$.each($(routeData).children('stop'), function(j, stopData) {
+							// tag, title, lat, lon, stopId
+							stop = stopData.attributes['tag'].value;
+							if(!stops[[agency, stop]]) { stops[[agency, stop]] = {}; }
+							setFromXML(stopData, stops[[agency, stop]], ['title', 'lat', 'lon', 'stopId'])
+						});
+						$.each($(routeData).children('direction'), function(j, directionData) {
+							// tag, title, name, useForUI  // name = short title
+							direction = directionData.attributes['tag'].value;
+							if(!routes[[agency, route]]['directions']) {routes[[agency, route]]['directions'] = {};}
+							if(!routes[[agency, route]]['directions'][direction]) {
+								routes[[agency, route]]['directions'][direction] = {};}
+							setFromXML(directionData, routes[[agency, route]]['directions'][direction], 
+							 ['title', 'name', 'useForUI']);
+							if(!routes[[agency, route]]['directions'][direction]['stops']) {
+								routes[[agency, route]]['directions'][direction]['stops'] = []; // Array not Object
+							}
+							$.each($(directionData).children('stop'), function(k, directionStop) {
+								stop = directionStop.attributes['tag'].value;
+								routes[[agency, route]]['directions'][direction]['stops'].push(stop);
+								if(!stops[[agency, stop]]['routes']) { stops[[agency, stop]]['routes'] = [];} // also Array
+								stops[[agency, stop]]['routes'].push([route, direction, k]);
+							});
+							
+							// get the schedule data too
+							$.get(base + "schedule&a=" + agency + "&r=" + route, handleScheduleData(agency, route));
+						});
+					});
+				};
+			}
+			
+			function handleScheduleData(agency, route) {
+				return function(scheduleData) {
+					$.each($(scheduleData).find('route'), function(route_i, routeData) {
+						if (!schedules[[agency, route]]) { schedules[[agency, route]] = {}; }
+						serviceClass = routeData.attributes['serviceClass'].value;
+						if (!schedules[[agency, route]][serviceClass]) { 
+							schedules[[agency, route]][serviceClass] = {};
+						}
+						direction = routeData.attributes['direction'].value;
+						if (!schedules[[agency, route]][serviceClass][direction]) { 
+							schedules[[agency, route]][serviceClass][direction] = []; // Array
+						}
+						scheduleArray = schedules[[agency, route]][serviceClass][direction];
+						$.each($(routeData).children('tr'), function(tr_i, trData) {
+							block = trData.attributes['blockID'].value;
+							$.each($(trData).children('stop'), function(tr_stop_i, trStopData){
+								// tag, epochTime (ms since midnight, or -1); contents: "05:16:00" or "--"
+								stop = trStopData.attributes['tag'].value;
+								timeofday = $(trStopData).contents[0];
+								if(timeofday != '--') {
+									epochTime = parseInt(trStopData.attributes['epochTime'].value);
+									timeToday = time(epochTime);
+
+									// FIXME: this isn't actually correct unless the next day is the same schedule class.
+									// if (timeToday < new Date()) { 
+									// 	timeToday = time(epochTime + 24*60*60*1000);
+									// }
+									if (timeToday > new Date()) { 
+										scheduleArray.push([stop, timeToday, block]);
+									}
+								}
+							});
+						});
+					});
+				};
+			}
+				
+			function getAgencies(all) {
+				$.get(base + "agencyList", function(agenciesData){
+					$.each($(agenciesData).find('agency'), function(agencies_i, agencyData){ 
+						// tag, title, shortTitle, regionTitle
+						agency = agencyData.attributes['tag'].value;
+						if(!agencies[agency]) {agencies[agency] = {};}
+
+						setFromXML(agencyData, agencies[agency], ['title', 'shortTitle']);
+
+						// recurse - async get routes
+						if (all || (agency == 'sf-muni')) {
+							$.get(base + "routeList&a=" + agency, handleRoutesListData(agency));
+						}
+					})
+				})
+			}
+		
+			function logall(data) {
+				$.each(data, function(k,v){console.log(k); console.log(v);})
+			}
+
+// http://webservices.nextbus.com/service/publicXMLFeed?command=schedule&a=sf-muni&r=27	
+// http://webservices.nextbus.com/service/publicXMLFeed?command=predictionsForMultiStops&a=sf-muni&useShortTitles=true&stops=27|3523
+		</script>
+	
+	
+	</body>
+</html>
